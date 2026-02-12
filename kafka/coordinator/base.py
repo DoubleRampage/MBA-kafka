@@ -292,7 +292,55 @@ class BaseCoordinator(object):
         Returns:
             bool: True if it should, False otherwise
         """
-        return self.rejoin_needed
+        with self._lock:
+            return self.rejoin_needed
+
+    def poll_heartbeat(self):
+        """
+        Check the status of the heartbeat thread (if it is active) and indicate
+        the liveness of the client. This must be called periodically after
+        joining with :meth:`.ensureActiveGroup` to ensure that the member stays
+        in the group. If an interval of time longer than the provided rebalance
+        timeout expires without calling this method, then the client will
+        proactively leave the group.
+
+        Raises: RuntimeError for unexpected errors raised from the heartbeat thread
+        """
+        with self._lock:
+            if self._heartbeat_thread is not None:
+                if self._heartbeat_thread.failed:
+                    # set the heartbeat thread to null and raise an exception.
+                    # If the user catches it, the next call to ensure_active_group()
+                    # will spawn a new heartbeat thread.
+                    cause = self._heartbeat_thread.failed
+                    self._heartbeat_thread = None
+                    raise cause
+                self.heartbeat.poll()
+
+    def time_to_next_heartbeat(self):
+        with self._lock:
+            # if we have not joined the group, we don't need to send heartbeats
+            if self.state is MemberState.UNJOINED:
+                return sys.maxsize
+            return self.heartbeat.time_to_next_heartbeat()
+
+    def _handle_join_success(self, member_assignment_bytes):
+        with self._lock:
+            log.info("Successfully joined group %s with generation %s",
+                     self.group_id, self._generation.generation_id)
+            self.join_future = None
+            self.state = MemberState.STABLE
+            self.rejoining = False
+            self._heartbeat_thread.enable()
+        self._on_join_complete(self._generation.generation_id,
+                               self._generation.member_id,
+                               self._generation.protocol,
+                               member_assignment_bytes)
+
+    def _handle_join_failure(self, exception):
+        with self._lock:
+            self.join_future = None
+            self.state = MemberState.UNJOINED
 
     def poll_heartbeat(self):
         """
@@ -705,10 +753,32 @@ class BaseCoordinator(object):
 
     def coordinator_dead(self, error):
         """Mark the current coordinator as dead."""
-        if self.coordinator_id is not None:
-            log.warning("Marking the coordinator dead (node %s) for group %s: %s.",
-                        self.coordinator_id, self.group_id, error)
-            self.coordinator_id = None
+        with self._lock:
+            if self.coordinator_id is not None:
+                log.warning("Marking the coordinator dead (node %s) for group %s: %s.",
+                            self.coordinator_id, self.group_id, error)
+                self.coordinator_id = None
+
+    def generation(self):
+        """Get the current generation state if the group is stable.
+
+        Returns: the current generation or None if the group is unjoined/rebalancing
+        """
+        with self._lock:
+            if self.state is not MemberState.STABLE:
+                return None
+            return self._generation
+
+    def reset_generation(self):
+        """Reset the generation and memberId because we have fallen out of the group."""
+        with self._lock:
+            self._generation = Generation.NO_GENERATION
+            self.rejoin_needed = True
+            self.state = MemberState.UNJOINED
+
+    def request_rejoin(self):
+        with self._lock:
+            self.rejoin_needed = True
 
     def generation(self):
         """Get the current generation state if the group is stable.
