@@ -1,9 +1,13 @@
 import logging
 import os
 import time
+from mock import patch
+import pytest
+import kafka.codec
 
-from six.moves import xrange
-import six
+import pytest
+from kafka.vendor.six.moves import range
+from kafka.vendor import six
 
 from . import unittest
 from kafka import (
@@ -13,19 +17,64 @@ from kafka import (
 from kafka.consumer.base import MAX_FETCH_BUFFER_SIZE_BYTES
 from kafka.errors import (
     ConsumerFetchSizeTooSmall, OffsetOutOfRangeError, UnsupportedVersionError,
-    KafkaTimeoutError
+    KafkaTimeoutError, UnsupportedCodecError
 )
 from kafka.structs import (
     ProduceRequestPayload, TopicPartition, OffsetAndTimestamp
 )
 
-from test.fixtures import ZookeeperFixture, KafkaFixture
-from test.testutil import (
-    KafkaIntegrationTestCase, kafka_versions, random_string, Timer
-)
+from test.fixtures import ZookeeperFixture, KafkaFixture, random_string, version
+from test.testutil import KafkaIntegrationTestCase, kafka_versions, Timer
+
+
+@pytest.mark.skipif(not version(), reason="No KAFKA_VERSION set")
+def test_kafka_consumer(kafka_producer, topic, kafka_consumer_factory):
+    """Test KafkaConsumer"""
+    kafka_consumer = kafka_consumer_factory(auto_offset_reset='earliest')
+
+    # TODO replace this with a `send_messages()` pytest fixture
+    # as we will likely need this elsewhere
+    for i in range(0, 100):
+        kafka_producer.send(topic, partition=0, value=str(i).encode())
+    for i in range(100, 200):
+        kafka_producer.send(topic, partition=1, value=str(i).encode())
+    kafka_producer.flush()
+
+    cnt = 0
+    messages = {0: set(), 1: set()}
+    for message in kafka_consumer:
+        logging.debug("Consumed message %s", repr(message))
+        cnt += 1
+        messages[message.partition].add(message.offset)
+        if cnt >= 200:
+            break
+
+    assert len(messages[0]) == 100
+    assert len(messages[1]) == 100
+    kafka_consumer.close()
+
+
+@pytest.mark.skipif(not version(), reason="No KAFKA_VERSION set")
+def test_kafka_consumer_unsupported_encoding(
+        topic, kafka_producer_factory, kafka_consumer_factory):
+    # Send a compressed message
+    producer = kafka_producer_factory(compression_type="gzip")
+    fut = producer.send(topic, b"simple message" * 200)
+    fut.get(timeout=5)
+    producer.close()
+
+    # Consume, but with the related compression codec not available
+    with patch.object(kafka.codec, "has_gzip") as mocked:
+        mocked.return_value = False
+        consumer = kafka_consumer_factory(auto_offset_reset='earliest')
+        error_msg = "Libraries for gzip compression codec not found"
+        with pytest.raises(UnsupportedCodecError, match=error_msg):
+            consumer.poll(timeout_ms=2000)
 
 
 class TestConsumerIntegration(KafkaIntegrationTestCase):
+    maxDiff = None
+
     @classmethod
     def setUpClass(cls):
         if not os.environ.get('KAFKA_VERSION'):
@@ -33,9 +82,9 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
 
         cls.zk = ZookeeperFixture.instance()
         chroot = random_string(10)
-        cls.server1 = KafkaFixture.instance(0, cls.zk.host, cls.zk.port,
+        cls.server1 = KafkaFixture.instance(0, cls.zk,
                                             zk_chroot=chroot)
-        cls.server2 = KafkaFixture.instance(1, cls.zk.host, cls.zk.port,
+        cls.server2 = KafkaFixture.instance(1, cls.zk,
                                             zk_chroot=chroot)
 
         cls.server = cls.server1 # Bootstrapping server
@@ -424,7 +473,7 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
         )
 
         # Grab the first 195 messages
-        output_msgs1 = [ consumer1.get_message().message.value for _ in xrange(195) ]
+        output_msgs1 = [ consumer1.get_message().message.value for _ in range(195) ]
         self.assert_message_count(output_msgs1, 195)
 
         # The total offset across both partitions should be at 180
@@ -499,24 +548,6 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
         messages = [ message for message in consumer ]
         self.assertEqual(len(messages), 2)
 
-    def test_kafka_consumer(self):
-        self.send_messages(0, range(0, 100))
-        self.send_messages(1, range(100, 200))
-
-        # Start a consumer
-        consumer = self.kafka_consumer(auto_offset_reset='earliest')
-        n = 0
-        messages = {0: set(), 1: set()}
-        for m in consumer:
-            logging.debug("Consumed message %s" % repr(m))
-            n += 1
-            messages[m.partition].add(m.offset)
-            if n >= 200:
-                break
-
-        self.assertEqual(len(messages[0]), 100)
-        self.assertEqual(len(messages[1]), 100)
-
     def test_kafka_consumer__blocking(self):
         TIMEOUT_MS = 500
         consumer = self.kafka_consumer(auto_offset_reset='earliest',
@@ -553,6 +584,7 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
                     messages.add((msg.partition, msg.offset))
         self.assertEqual(len(messages), 5)
         self.assertGreaterEqual(t.interval, TIMEOUT_MS / 1000.0 )
+        consumer.close()
 
     @kafka_versions('>=0.8.1')
     def test_kafka_consumer__offset_commit_resume(self):
@@ -571,7 +603,7 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
 
         # Grab the first 180 messages
         output_msgs1 = []
-        for _ in xrange(180):
+        for _ in range(180):
             m = next(consumer1)
             output_msgs1.append(m)
         self.assert_message_count(output_msgs1, 180)
@@ -587,11 +619,12 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
 
         # 181-200
         output_msgs2 = []
-        for _ in xrange(20):
+        for _ in range(20):
             m = next(consumer2)
             output_msgs2.append(m)
         self.assert_message_count(output_msgs2, 20)
         self.assertEqual(len(set(output_msgs1) | set(output_msgs2)), 200)
+        consumer2.close()
 
     @kafka_versions('>=0.10.1')
     def test_kafka_consumer_max_bytes_simple(self):
@@ -612,6 +645,7 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
         self.assertEqual(
             seen_partitions, set([
                 TopicPartition(self.topic, 0), TopicPartition(self.topic, 1)]))
+        consumer.close()
 
     @kafka_versions('>=0.10.1')
     def test_kafka_consumer_max_bytes_one_msg(self):
@@ -637,6 +671,7 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
 
         fetched_msgs = [next(consumer) for i in range(10)]
         self.assertEqual(len(fetched_msgs), 10)
+        consumer.close()
 
     @kafka_versions('>=0.10.1')
     def test_kafka_consumer_offsets_for_time(self):
@@ -645,13 +680,14 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
         early_time = late_time - 2000
         tp = TopicPartition(self.topic, 0)
 
+        timeout = 10
         kafka_producer = self.kafka_producer()
         early_msg = kafka_producer.send(
             self.topic, partition=0, value=b"first",
-            timestamp_ms=early_time).get()
+            timestamp_ms=early_time).get(timeout)
         late_msg = kafka_producer.send(
             self.topic, partition=0, value=b"last",
-            timestamp_ms=late_time).get()
+            timestamp_ms=late_time).get(timeout)
 
         consumer = self.kafka_consumer()
         offsets = consumer.offsets_for_times({tp: early_time})
@@ -689,6 +725,7 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
         self.assertEqual(offsets, {
             tp: late_msg.offset + 1
         })
+        consumer.close()
 
     @kafka_versions('>=0.10.1')
     def test_kafka_consumer_offsets_search_many_partitions(self):
@@ -697,12 +734,13 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
 
         kafka_producer = self.kafka_producer()
         send_time = int(time.time() * 1000)
+        timeout = 10
         p0msg = kafka_producer.send(
             self.topic, partition=0, value=b"XXX",
-            timestamp_ms=send_time).get()
+            timestamp_ms=send_time).get(timeout)
         p1msg = kafka_producer.send(
             self.topic, partition=1, value=b"XXX",
-            timestamp_ms=send_time).get()
+            timestamp_ms=send_time).get(timeout)
 
         consumer = self.kafka_consumer()
         offsets = consumer.offsets_for_times({
@@ -726,6 +764,7 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
             tp0: p0msg.offset + 1,
             tp1: p1msg.offset + 1
         })
+        consumer.close()
 
     @kafka_versions('<0.10.1')
     def test_kafka_consumer_offsets_for_time_old(self):
@@ -737,7 +776,8 @@ class TestConsumerIntegration(KafkaIntegrationTestCase):
 
     @kafka_versions('>=0.10.1')
     def test_kafka_consumer_offsets_for_times_errors(self):
-        consumer = self.kafka_consumer()
+        consumer = self.kafka_consumer(fetch_max_wait_ms=200,
+                                       request_timeout_ms=500)
         tp = TopicPartition(self.topic, 0)
         bad_tp = TopicPartition(self.topic, 100)
 

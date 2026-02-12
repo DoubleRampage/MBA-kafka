@@ -2,13 +2,13 @@ import socket
 
 from mock import ANY, MagicMock, patch
 from operator import itemgetter
-import six
+from kafka.vendor import six
 from . import unittest
 
 from kafka import SimpleClient
 from kafka.errors import (
     KafkaUnavailableError, LeaderNotAvailableError, KafkaTimeoutError,
-    UnknownTopicOrPartitionError, ConnectionError, FailedPayloadsError)
+    UnknownTopicOrPartitionError, FailedPayloadsError)
 from kafka.future import Future
 from kafka.protocol import KafkaProtocol, create_message
 from kafka.protocol.metadata import MetadataResponse
@@ -28,6 +28,7 @@ def mock_conn(conn, success=True):
     else:
         mocked.send.return_value = Future().failure(Exception())
     conn.return_value = mocked
+    conn.recv.return_value = []
 
 
 class TestSimpleClient(unittest.TestCase):
@@ -94,7 +95,7 @@ class TestSimpleClient(unittest.TestCase):
         mock_conn(mocked_conns[('kafka03', 9092)], success=False)
         future = Future()
         mocked_conns[('kafka02', 9092)].send.return_value = future
-        mocked_conns[('kafka02', 9092)].recv.side_effect = lambda: future.success('valid response')
+        mocked_conns[('kafka02', 9092)].recv.return_value = [('valid response', future)]
 
         def mock_get_conn(host, port, afi):
             return mocked_conns[(host, port)]

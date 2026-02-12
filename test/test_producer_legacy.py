@@ -16,7 +16,7 @@ from kafka.protocol import CODEC_NONE
 from kafka.structs import (
     ProduceResponsePayload, RetryOptions, TopicPartition)
 
-from six.moves import queue, xrange
+from kafka.vendor.six.moves import queue, range
 
 
 class TestKafkaProducer(unittest.TestCase):
@@ -73,7 +73,7 @@ class TestKafkaProducer(unittest.TestCase):
     @patch('kafka.producer.base._send_upstream')
     def test_producer_async_queue_overfilled(self, mock):
         queue_size = 2
-        producer = Producer(MagicMock(), async=True,
+        producer = Producer(MagicMock(), async_send=True,
                             async_queue_maxsize=queue_size)
 
         topic = b'test-topic'
@@ -84,7 +84,7 @@ class TestKafkaProducer(unittest.TestCase):
             message_list = [message] * (queue_size + 1)
             producer.send_messages(topic, partition, *message_list)
         self.assertEqual(producer.queue.qsize(), queue_size)
-        for _ in xrange(producer.queue.qsize()):
+        for _ in range(producer.queue.qsize()):
             producer.queue.get()
 
     def test_producer_sync_fail_on_error(self):
@@ -95,25 +95,25 @@ class TestKafkaProducer(unittest.TestCase):
                     with patch.object(SimpleClient, '_send_broker_aware_request', return_value = [error]):
 
                         client = SimpleClient(MagicMock())
-                        producer = SimpleProducer(client, async=False, sync_fail_on_error=False)
+                        producer = SimpleProducer(client, async_send=False, sync_fail_on_error=False)
 
                         # This should not raise
                         (response,) = producer.send_messages('foobar', b'test message')
                         self.assertEqual(response, error)
 
-                        producer = SimpleProducer(client, async=False, sync_fail_on_error=True)
+                        producer = SimpleProducer(client, async_send=False, sync_fail_on_error=True)
                         with self.assertRaises(FailedPayloadsError):
                             producer.send_messages('foobar', b'test message')
 
     def test_cleanup_is_not_called_on_stopped_producer(self):
-        producer = Producer(MagicMock(), async=True)
+        producer = Producer(MagicMock(), async_send=True)
         producer.stopped = True
         with patch.object(producer, 'stop') as mocked_stop:
             producer._cleanup_func(producer)
             self.assertEqual(mocked_stop.call_count, 0)
 
     def test_cleanup_is_called_on_running_producer(self):
-        producer = Producer(MagicMock(), async=True)
+        producer = Producer(MagicMock(), async_send=True)
         producer.stopped = False
         with patch.object(producer, 'stop') as mocked_stop:
             producer._cleanup_func(producer)
@@ -253,5 +253,5 @@ class TestKafkaProducerSendUpstream(unittest.TestCase):
         self.assertEqual(self.client.send_produce_request.call_count, 5)
 
     def tearDown(self):
-        for _ in xrange(self.queue.qsize()):
+        for _ in range(self.queue.qsize()):
             self.queue.get()
